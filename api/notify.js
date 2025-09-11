@@ -44,7 +44,7 @@ export default async function handler(req, res) {
     // 1️⃣ Send via FCM
     const fcmMessage = {
       notification: {
-        title: notificationData.title || "Mastodon Notification",
+        title: notificationData.title || "Qlub",
         body: notificationData.body || "",
       },
       token: fcmToken,
