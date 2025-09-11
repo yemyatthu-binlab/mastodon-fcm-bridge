@@ -1,15 +1,12 @@
 // api/notify.js
 import { kv } from "@vercel/kv";
+import webpush from "web-push";
 import admin from "firebase-admin";
 
 // Initialize Firebase Admin SDK
-// IMPORTANT: We check if the app is already initialized to avoid errors on hot reloads.
 if (!admin.apps.length) {
-  // Get credentials from environment variables
   const serviceAccount = JSON.parse(
-    Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT_BASE64, "base64").toString(
-      "utf-8"
-    )
+    Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT_BASE64, "base64").toString("utf-8")
   );
 
   admin.initializeApp({
@@ -18,53 +15,71 @@ if (!admin.apps.length) {
 }
 
 export default async function handler(req, res) {
+  console.log("Notify handler invoked");
+
   if (req.method !== "POST") {
     return res.status(405).end();
   }
 
   try {
-    // 1. Get the unique ID from the query parameter
     const { id } = req.query;
     if (!id) {
       return res.status(400).json({ error: "Subscription ID is missing." });
     }
 
-    // 2. Retrieve the corresponding FCM token from Vercel KV
-    const fcmToken = await kv.get(id);
-    if (!fcmToken) {
-      return res
-        .status(404)
-        .json({ error: "FCM token not found for this subscription." });
+    // Retrieve stored subscription from KV
+    const subscription = await kv.get(id);
+    if (!subscription) {
+      return res.status(404).json({ error: "Subscription not found." });
     }
 
-    // 3. The notification data from Mastodon is in the request body
-    const notificationData = req.body;
+    const { fcmToken, pushKeys } = subscription;
+    if (!fcmToken || !pushKeys) {
+      return res.status(500).json({ error: "Invalid subscription data." });
+    }
 
-    // 4. Construct the push notification message
-    const message = {
+    const notificationData = req.body;
+    console.log("Notification data:", notificationData);
+
+    // 1️⃣ Send via FCM
+    const fcmMessage = {
       notification: {
-        title: notificationData.title,
-        body: notificationData.body,
+        title: notificationData.title || "Mastodon Notification",
+        body: notificationData.body || "",
       },
       token: fcmToken,
-      // You can also add 'data' payload for background processing in your app
-      // data: { ... }
+      data: notificationData.data || {},
     };
 
-    // 5. Send the message using Firebase Admin SDK
-    const response = await admin.messaging().send(message);
-    console.log("Successfully sent message:", response);
+    try {
+      const fcmResponse = await admin.messaging().send(fcmMessage);
+      console.log("FCM sent successfully:", fcmResponse);
+    } catch (fcmError) {
+      console.error("FCM send failed:", fcmError);
+      if (fcmError.code === "messaging/registration-token-not-registered") {
+        await kv.del(id); // Remove invalid token
+      }
+    }
+
+    // 2️⃣ Optionally send via Web Push (Mastodon expects RFC-compliant Web Push)
+    const webPushSubscription = {
+      endpoint: `https://${req.headers.host}/api/notify?id=${id}`,
+      keys: {
+        p256dh: pushKeys.p256dh,
+        auth: pushKeys.auth,
+      },
+    };
+
+    try {
+      await webpush.sendNotification(webPushSubscription, JSON.stringify(notificationData));
+      console.log("Web Push sent successfully");
+    } catch (wpError) {
+      console.error("Web Push failed:", wpError);
+    }
 
     return res.status(200).json({ success: true });
   } catch (error) {
-    console.error("Failed to send notification:", error);
-    // If the token is invalid, you might want to remove it from KV
-    if (error.code === "messaging/registration-token-not-registered") {
-      const { id } = req.query;
-      if (id) {
-        await kv.del(id);
-      }
-    }
-    return res.status(500).json({ error: "Failed to send push notification." });
+    console.error("Unhandled error in notify handler:", error);
+    return res.status(500).json({ error: "Internal Server Error", details: error.message });
   }
 }
