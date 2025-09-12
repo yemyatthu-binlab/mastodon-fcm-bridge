@@ -1,16 +1,13 @@
-// api/notify.js
 import { kv } from "@vercel/kv";
 import webpush from "web-push";
 import admin from "firebase-admin";
 
-// Initialize Firebase Admin SDK
 if (!admin.apps.length) {
   const serviceAccount = JSON.parse(
     Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT_BASE64, "base64").toString(
       "utf-8"
     )
   );
-
   admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
   });
@@ -24,31 +21,12 @@ export default async function handler(req, res) {
   }
 
   try {
-    let rawBody;
-    if (Buffer.isBuffer(req.body)) {
-      rawBody = req.body.toString("utf-8"); // decode buffer
-    } else if (typeof req.body === "string") {
-      rawBody = req.body;
-    } else {
-      rawBody = JSON.stringify(req.body);
-    }
-
     const { id } = req.query;
     if (!id) {
       return res.status(400).json({ error: "Subscription ID is missing." });
     }
 
-    let notificationData;
-    try {
-      notificationData = JSON.parse(rawBody);
-    } catch (e) {
-      console.warn("Notification data is not valid JSON, using raw string.");
-      notificationData = { raw: rawBody };
-    }
-
-    console.log("ParsedNotificationData:", notificationData);
-
-    // Retrieve stored subscription from KV
+    // 1️⃣ Get subscription from KV
     const subscription = await kv.get(id);
     if (!subscription) {
       return res.status(404).json({ error: "Subscription not found." });
@@ -59,18 +37,42 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: "Invalid subscription data." });
     }
 
-    // 1️⃣ Send via FCM
+    // 2️⃣ Decrypt Mastodon Notification Payload
+    let decrypted;
+    try {
+      decrypted = await webpush.decrypt(
+        req.body, // encrypted payload (Buffer)
+        pushKeys.privateKey, // the VAPID private key you stored in subscribe.js
+        pushKeys.publicKey   // public key (p256dh)
+      );
+    } catch (decryptError) {
+      console.error("Failed to decrypt notification:", decryptError);
+      return res.status(500).json({ error: "Decryption failed" });
+    }
+
+    let notificationData;
+    try {
+      notificationData = JSON.parse(decrypted);
+    } catch (parseError) {
+      console.error("Failed to parse decrypted payload:", parseError);
+      return res.status(500).json({ error: "Invalid JSON in decrypted data" });
+    }
+
+    console.log("Decrypted Mastodon Notification:", notificationData);
+
+    // 3️⃣ Build FCM Message
+    const mastodonNotif = notificationData.notification || {};
     const fcmMessage = {
       notification: {
         title: "Qlub",
-        body: notificationData.body || "You have a new notification",
+        body: `${mastodonNotif.account?.username || "Someone"} ${mastodonNotif.type}ed you`,
       },
       token: fcmToken,
       data: {
-        noti_type: notificationData.type || "mention",
-        reblogged_id: notificationData.reblogged_id || "0",
-        destination_id: notificationData.destination_id || "",
-        visibility: notificationData.visibility || "public",
+        noti_type: mastodonNotif.type || "mention",
+        reblogged_id: mastodonNotif.status?.reblog?.id || "0",
+        destination_id: mastodonNotif.status?.id || "",
+        visibility: mastodonNotif.status?.visibility || "public",
       },
     };
 
@@ -80,27 +82,8 @@ export default async function handler(req, res) {
     } catch (fcmError) {
       console.error("FCM send failed:", fcmError);
       if (fcmError.code === "messaging/registration-token-not-registered") {
-        await kv.del(id); // Remove invalid token
+        await kv.del(id);
       }
-    }
-
-    // 2️⃣ Optionally send via Web Push (Mastodon expects RFC-compliant Web Push)
-    const webPushSubscription = {
-      endpoint: `https://${req.headers.host}/api/notify?id=${id}`,
-      keys: {
-        p256dh: pushKeys.p256dh,
-        auth: pushKeys.auth,
-      },
-    };
-
-    try {
-      await webpush.sendNotification(
-        webPushSubscription,
-        JSON.stringify(notificationData)
-      );
-      console.log("Web Push sent successfully");
-    } catch (wpError) {
-      console.error("Web Push failed:", wpError);
     }
 
     return res.status(200).json({ success: true });
