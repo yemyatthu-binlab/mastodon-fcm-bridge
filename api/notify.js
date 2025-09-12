@@ -6,7 +6,9 @@ import admin from "firebase-admin";
 // Initialize Firebase Admin SDK
 if (!admin.apps.length) {
   const serviceAccount = JSON.parse(
-    Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT_BASE64, "base64").toString("utf-8")
+    Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT_BASE64, "base64").toString(
+      "utf-8"
+    )
   );
 
   admin.initializeApp({
@@ -44,8 +46,8 @@ export default async function handler(req, res) {
     // 1️⃣ Send via FCM
     const fcmMessage = {
       notification: {
-        title: notificationData.title || "Qlub",
-        body: notificationData.body || "",
+        title: "Qlub",
+        body: "YMT mentioned you",
       },
       token: fcmToken,
       data: notificationData.data || {},
@@ -71,7 +73,10 @@ export default async function handler(req, res) {
     };
 
     try {
-      await webpush.sendNotification(webPushSubscription, JSON.stringify(notificationData));
+      await webpush.sendNotification(
+        webPushSubscription,
+        JSON.stringify(notificationData)
+      );
       console.log("Web Push sent successfully");
     } catch (wpError) {
       console.error("Web Push failed:", wpError);
@@ -80,6 +85,8 @@ export default async function handler(req, res) {
     return res.status(200).json({ success: true });
   } catch (error) {
     console.error("Unhandled error in notify handler:", error);
-    return res.status(500).json({ error: "Internal Server Error", details: error.message });
+    return res
+      .status(500)
+      .json({ error: "Internal Server Error", details: error.message });
   }
 }
