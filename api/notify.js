@@ -24,10 +24,29 @@ export default async function handler(req, res) {
   }
 
   try {
+    let rawBody;
+    if (Buffer.isBuffer(req.body)) {
+      rawBody = req.body.toString("utf-8"); // decode buffer
+    } else if (typeof req.body === "string") {
+      rawBody = req.body;
+    } else {
+      rawBody = JSON.stringify(req.body);
+    }
+
     const { id } = req.query;
     if (!id) {
       return res.status(400).json({ error: "Subscription ID is missing." });
     }
+
+    let notificationData;
+    try {
+      notificationData = JSON.parse(rawBody);
+    } catch (e) {
+      console.warn("Notification data is not valid JSON, using raw string.");
+      notificationData = { raw: rawBody };
+    }
+
+    console.log("ParsedNotificationData:", notificationData);
 
     // Retrieve stored subscription from KV
     const subscription = await kv.get(id);
@@ -40,17 +59,19 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: "Invalid subscription data." });
     }
 
-    const notificationData = req.body;
-    console.log("Notification data:", notificationData);
-
     // 1️⃣ Send via FCM
     const fcmMessage = {
       notification: {
         title: "Qlub",
-        body: "YMT mentioned you",
+        body: notificationData.body || "You have a new notification",
       },
       token: fcmToken,
-      data: notificationData.data || {},
+      data: {
+        noti_type: notificationData.type || "mention",
+        reblogged_id: notificationData.reblogged_id || "0",
+        destination_id: notificationData.destination_id || "",
+        visibility: notificationData.visibility || "public",
+      },
     };
 
     try {
