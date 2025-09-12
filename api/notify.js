@@ -1,7 +1,8 @@
 // api/notify.js
 import { kv } from "@vercel/kv";
 import admin from "firebase-admin";
-import http_ece from "http_ece"; // ✅ Correct import
+import http_ece from "http_ece";
+import { createECDH } from "crypto"; // ✅ Import createECDH
 
 // Initialize Firebase Admin
 if (!admin.apps.length) {
@@ -13,14 +14,12 @@ if (!admin.apps.length) {
   });
 }
 
-// IMPORTANT: Tell Vercel to not parse the body. We need the raw buffer.
 export const config = {
   api: {
     bodyParser: false,
   },
 };
 
-// Helper to buffer the raw request stream
 async function buffer(readable) {
   const chunks = [];
   for await (const chunk of readable) {
@@ -40,7 +39,6 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Subscription ID is missing." });
     }
 
-    // 1️⃣ Get subscription from KV
     const subscription = await kv.get(id);
     if (!subscription) {
       return res.status(404).json({ error: "Subscription not found." });
@@ -50,20 +48,23 @@ export default async function handler(req, res) {
     if (!fcmToken || !keys || !keys.privateKey || !keys.auth) {
       return res.status(500).json({ error: "Invalid subscription data in KV." });
     }
-    
-    // Convert keys from base64 strings back to Buffers
-    const privateKey = Buffer.from(keys.privateKey, 'base64');
-    const authSecret = Buffer.from(keys.auth, 'base64');
 
-    // 2️⃣ Decrypt Mastodon Notification Payload
+    // ✅ --- START: FIX --- ✅
+    // 1. Recreate the ECDH object from the stored private key
+    const ecdh = createECDH('prime256v1');
+    ecdh.setPrivateKey(Buffer.from(keys.privateKey, 'base64'));
+    
+    // 2. Get the auth secret as a Buffer
+    const authSecret = Buffer.from(keys.auth, 'base64');
+    // ✅ --- END: FIX --- ✅
+    
     let decryptedPayload;
     try {
-      const rawBody = await buffer(req); // Get the raw request body
+      const rawBody = await buffer(req);
       
-      // ✅ Use http_ece.decrypt() with the correct parameters
       const params = {
-        version: 'aesgcm', // The standard for Web Push
-        privateKey: privateKey,
+        version: 'aesgcm',
+        privateKey: ecdh, // ✅ Pass the full ECDH object, not a raw buffer
         authSecret: authSecret,
         dh: req.headers['crypto-key']?.split(';')[0]?.split('=')[1],
         salt: req.headers['encryption']?.split('=')[1],
@@ -75,11 +76,9 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: "Decryption failed", details: decryptError.message });
     }
 
-    // Now, parse the decrypted buffer to get the JSON object
     const notificationData = JSON.parse(decryptedPayload.toString('utf-8'));
     console.log("✅ Successfully decrypted Mastodon Notification:", notificationData);
 
-    // 3️⃣ Build FCM Message (Your logic here is already good!)
     const mastodonNotif = notificationData.notification || {};
     const fcmMessage = {
       notification: {
@@ -95,7 +94,6 @@ export default async function handler(req, res) {
       },
     };
 
-    // 4️⃣ Send to FCM
     try {
       const fcmResponse = await admin.messaging().send(fcmMessage);
       console.log("FCM sent successfully:", fcmResponse);
