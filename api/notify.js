@@ -2,12 +2,14 @@
 import { kv } from "@vercel/kv";
 import admin from "firebase-admin";
 import http_ece from "http_ece";
-import { createECDH } from "crypto"; // ✅ Import createECDH
+import { createECDH } from "crypto";
 
 // Initialize Firebase Admin
 if (!admin.apps.length) {
   const serviceAccount = JSON.parse(
-    Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT_BASE64, "base64").toString("utf-8")
+    Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT_BASE64, "base64").toString(
+      "utf-8"
+    )
   );
   admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
@@ -23,7 +25,7 @@ export const config = {
 async function buffer(readable) {
   const chunks = [];
   for await (const chunk of readable) {
-    chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
+    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
   }
   return Buffer.concat(chunks);
 }
@@ -46,51 +48,97 @@ export default async function handler(req, res) {
 
     const { fcmToken, keys } = subscription;
     if (!fcmToken || !keys || !keys.privateKey || !keys.auth) {
-      return res.status(500).json({ error: "Invalid subscription data in KV." });
+      return res
+        .status(500)
+        .json({ error: "Invalid subscription data in KV." });
     }
 
-    // ✅ --- START: FIX --- ✅
-    // 1. Recreate the ECDH object from the stored private key
-    const ecdh = createECDH('prime256v1');
-    ecdh.setPrivateKey(Buffer.from(keys.privateKey, 'base64'));
-    
-    // 2. Get the auth secret as a Buffer
-    const authSecret = Buffer.from(keys.auth, 'base64');
-    // ✅ --- END: FIX --- ✅
-    
+    const ecdh = createECDH("prime256v1");
+    ecdh.setPrivateKey(Buffer.from(keys.privateKey, "base64"));
+    const authSecret = Buffer.from(keys.auth, "base64");
+
     let decryptedPayload;
     try {
       const rawBody = await buffer(req);
-      
       const params = {
-        version: 'aesgcm',
-        privateKey: ecdh, // ✅ Pass the full ECDH object, not a raw buffer
+        version: "aesgcm",
+        privateKey: ecdh,
         authSecret: authSecret,
-        dh: req.headers['crypto-key']?.split(';')[0]?.split('=')[1],
-        salt: req.headers['encryption']?.split('=')[1],
+        dh: req.headers["crypto-key"]?.split(";")[0]?.split("=")[1],
+        salt: req.headers["encryption"]?.split("=")[1],
       };
       decryptedPayload = http_ece.decrypt(rawBody, params);
-
     } catch (decryptError) {
       console.error("Failed to decrypt notification:", decryptError);
-      return res.status(500).json({ error: "Decryption failed", details: decryptError.message });
+      return res
+        .status(500)
+        .json({ error: "Decryption failed", details: decryptError.message });
     }
 
-    const notificationData = JSON.parse(decryptedPayload.toString('utf-8'));
-    console.log("✅ Successfully decrypted Mastodon Notification:", notificationData);
+    const notificationData = JSON.parse(decryptedPayload.toString("utf-8"));
+    console.log(
+      "✅ Successfully decrypted Mastodon Notification:",
+      notificationData
+    );
 
-    const mastodonNotif = notificationData.notification || {};
+    // ✅ --- START: NEW LOGIC --- ✅
+    // 🔄 Fetch the full notification details from the Mastodon API
+    let fullNotification = {};
+    try {
+      const { notification_id, access_token } = notificationData;
+      if (!notification_id || !access_token) {
+        throw new Error(
+          "Missing notification_id or access_token in webhook payload."
+        );
+      }
+
+      const mastodonAPIResponse = await fetch(
+        `https://qlub.channel.org/api/v1/notifications/${notification_id}`,
+        {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${access_token}`,
+          },
+        }
+      );
+
+      if (!mastodonAPIResponse.ok) {
+        throw new Error(
+          `Mastodon API failed with status: ${mastodonAPIResponse.status}`
+        );
+      }
+
+      fullNotification = await mastodonAPIResponse.json();
+      console.log(
+        "✅ Successfully fetched full notification:",
+        fullNotification
+      );
+    } catch (fetchError) {
+      console.error("Could not fetch full notification details:", fetchError);
+      // We can still proceed with the limited data from the webhook as a fallback
+    }
+    // ✅ --- END: NEW LOGIC --- ✅
+
+    // 🚀 Build the FCM message using the richer data
+    const mastodonStatus = fullNotification.status || {}; // Use fetched status if available
+
     const fcmMessage = {
       notification: {
+        // Use the title and body from the webhook payload, as they are pre-formatted.
         title: "Qlub",
-        body: `${mastodonNotif.account?.display_name || "Someone"} ${mastodonNotif.type}d you`,
+        body:
+          notificationData.title || "You have a new notification",
       },
       token: fcmToken,
       data: {
-        noti_type: mastodonNotif.type || "unknown",
-        reblogged_id: mastodonNotif.status?.reblog?.id || "0",
-        destination_id: mastodonNotif.status?.id || "",
-        visibility: mastodonNotif.status?.visibility || "public",
+        // Use the full notification type, falling back to the webhook's type
+        noti_type:
+          fullNotification.type ||
+          notificationData.notification_type ||
+          "unknown",
+        reblogged_id: mastodonStatus.reblog?.id || "0",
+        destination_id: mastodonStatus.id || "",
+        visibility: mastodonStatus.visibility || "public",
       },
     };
 
@@ -107,6 +155,8 @@ export default async function handler(req, res) {
     return res.status(200).json({ success: true });
   } catch (error) {
     console.error("Unhandled error in notify handler:", error);
-    return res.status(500).json({ error: "Internal Server Error", details: error.message });
+    return res
+      .status(500)
+      .json({ error: "Internal Server Error", details: error.message });
   }
 }
