@@ -47,7 +47,7 @@ export default async function handler(req, res) {
     // 5️⃣ Register webhook with Mastodon
     try {
       const mastodonResponse = await fetch(
-        "https://qlub.social/api/v1/push/subscription",
+        "https://qlub.channel.org/api/v1/push/subscription",
         {
           method: "POST",
           headers: {
