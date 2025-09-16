@@ -45,13 +45,19 @@ export default async function handler(req, res) {
     if (!subscription) {
       return res.status(404).json({ error: "Subscription not found." });
     }
-
-    const { fcmToken, keys } = subscription;
+    
+    // 🔄 MODIFIED: Destructure 'instanceUrl' from the subscription data.
+    const { fcmToken, keys, instanceUrl } = subscription;
     if (!fcmToken || !keys || !keys.privateKey || !keys.auth) {
       return res
         .status(500)
         .json({ error: "Invalid subscription data in KV." });
     }
+    
+    // ✨ NEW: Define the default instance for backward compatibility.
+    const defaultInstance = "https://qlub.channel.org";
+    // ✨ NEW: Use the instanceUrl from KV or fall back to the default.
+    const targetInstance = instanceUrl || defaultInstance;
 
     const ecdh = createECDH("prime256v1");
     ecdh.setPrivateKey(Buffer.from(keys.privateKey, "base64"));
@@ -77,12 +83,10 @@ export default async function handler(req, res) {
 
     const notificationData = JSON.parse(decryptedPayload.toString("utf-8"));
     console.log(
-      "✅ Successfully decrypted Mastodon Notification:",
+      `✅ Successfully decrypted notification from ${targetInstance}:`,
       notificationData
     );
 
-    // ✅ --- START: NEW LOGIC --- ✅
-    // 🔄 Fetch the full notification details from the Mastodon API
     let fullNotification = {};
     try {
       const { notification_id, access_token } = notificationData;
@@ -92,8 +96,9 @@ export default async function handler(req, res) {
         );
       }
 
+      // 🔄 MODIFIED: Use the dynamic 'targetInstance' URL to fetch notification details.
       const mastodonAPIResponse = await fetch(
-        `https://qlub.channel.org/api/v1/notifications/${notification_id}`,
+        `${targetInstance}/api/v1/notifications/${notification_id}`,
         {
           method: "GET",
           headers: {
@@ -115,23 +120,17 @@ export default async function handler(req, res) {
       );
     } catch (fetchError) {
       console.error("Could not fetch full notification details:", fetchError);
-      // We can still proceed with the limited data from the webhook as a fallback
     }
-    // ✅ --- END: NEW LOGIC --- ✅
 
-    // 🚀 Build the FCM message using the richer data
-    const mastodonStatus = fullNotification.status || {}; // Use fetched status if available
+    const mastodonStatus = fullNotification.status || {};
 
     const fcmMessage = {
       notification: {
-        // Use the title and body from the webhook payload, as they are pre-formatted.
         title: "Qlub",
-        body:
-          notificationData.title || "You have a new notification",
+        body: notificationData.title || "You have a new notification",
       },
       token: fcmToken,
       data: {
-        // Use the full notification type, falling back to the webhook's type
         noti_type:
           fullNotification.type ||
           notificationData.notification_type ||

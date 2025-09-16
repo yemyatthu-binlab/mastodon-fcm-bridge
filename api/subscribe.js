@@ -4,7 +4,11 @@ import { randomBytes, createECDH } from "crypto";
 
 // Helper to encode keys in URL-safe Base64
 function toUrlSafeBase64(buffer) {
-  return buffer.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+  return buffer
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=/g, "");
 }
 
 export default async function handler(req, res) {
@@ -15,29 +19,38 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { fcmToken, mastodonToken } = req.body || {};
+    // 🔄 MODIFIED: Also accept an 'instanceUrl' from the request body.
+    const { fcmToken, mastodonToken, instanceUrl } = req.body || {};
 
     if (!fcmToken || !mastodonToken) {
-      return res.status(400).json({ error: "fcmToken and mastodonToken are required." });
+      return res
+        .status(400)
+        .json({ error: "fcmToken and mastodonToken are required." });
     }
+
+    // ✨ NEW: Define the default instance for backward compatibility.
+    const defaultInstance = "https://qlub.channel.org";
+    // ✨ NEW: Use the provided instanceUrl or fall back to the default.
+    const targetInstance = instanceUrl || defaultInstance;
 
     // 1️⃣ Generate a unique subscription ID
     const subscriptionId = uuidv4();
 
     // 2️⃣ Generate correct Web Push subscription keys
-    const ecdh = createECDH('prime256v1');
+    const ecdh = createECDH("prime256v1");
     ecdh.generateKeys();
-    const publicKey = ecdh.getPublicKey(); // This is the p256dh key
-    const privateKey = ecdh.getPrivateKey(); // This is the private key we need to store
-    const authSecret = randomBytes(16); // This is the auth secret
+    const publicKey = ecdh.getPublicKey();
+    const privateKey = ecdh.getPrivateKey();
+    const authSecret = randomBytes(16);
 
-    // 3️⃣ Store mapping in Vercel KV. We store the private key and auth secret.
-    // Keys are stored as base64 strings for compatibility with JSON in KV.
+    // 3️⃣ Store mapping in Vercel KV.
+    // 🔄 MODIFIED: We now also store the 'targetInstance' URL.
     const subscriptionData = {
       fcmToken,
+      instanceUrl: targetInstance, // Store the instance URL
       keys: {
-        privateKey: privateKey.toString('base64'),
-        auth: authSecret.toString('base64'),
+        privateKey: privateKey.toString("base64"),
+        auth: authSecret.toString("base64"),
       },
     };
     await kv.set(subscriptionId, subscriptionData, { ex: 60 * 60 * 24 * 30 }); // 30 days
@@ -47,8 +60,9 @@ export default async function handler(req, res) {
     const webhookUrl = `https://${host}/api/notify?id=${subscriptionId}`;
 
     // 5️⃣ Register webhook with Mastodon
+    // 🔄 MODIFIED: Use the dynamic 'targetInstance' URL instead of the hardcoded one.
     const mastodonResponse = await fetch(
-      "https://qlub.channel.org/api/v1/push/subscription",
+      `${targetInstance}/api/v1/push/subscription`,
       {
         method: "POST",
         headers: {
@@ -59,7 +73,6 @@ export default async function handler(req, res) {
           subscription: {
             endpoint: webhookUrl,
             keys: {
-              // Keys sent to Mastodon must be URL-safe Base64 encoded
               p256dh: toUrlSafeBase64(publicKey),
               auth: toUrlSafeBase64(authSecret),
             },
@@ -80,22 +93,24 @@ export default async function handler(req, res) {
     if (!mastodonResponse.ok) {
       const errorData = await mastodonResponse.text();
       console.error("Mastodon API responded with error:", errorData);
-      // Delete the key if Mastodon registration fails
-      await kv.del(subscriptionId); 
+      await kv.del(subscriptionId);
       return res.status(500).json({
         error: "Mastodon API error",
         details: errorData,
       });
     }
 
-    console.log("Mastodon subscription created successfully");
+    console.log(
+      `Mastodon subscription created successfully for ${targetInstance}`
+    );
     return res.status(200).json({
       message: "Subscription created successfully.",
       subscriptionId,
     });
-
   } catch (error) {
     console.error("Unhandled error in subscription handler:", error);
-    return res.status(500).json({ error: "Internal Server Error", details: error.message });
+    return res
+      .status(500)
+      .json({ error: "Internal Server Error", details: error.message });
   }
 }
