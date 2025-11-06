@@ -1,8 +1,6 @@
-// api/subscribe.js
 import { kv } from "@vercel/kv";
 import { randomBytes, createECDH } from "crypto";
 
-// Helper to encode keys in URL-safe Base64
 function toUrlSafeBase64(buffer) {
   return buffer
     .toString("base64")
@@ -19,50 +17,60 @@ export default async function handler(req, res) {
   }
 
   try {
-    // 🔄 MODIFIED: Also accept an 'instanceUrl' from the request body.
-    const { fcmToken, mastodonToken, instanceUrl } = req.body || {};
+    const { fcmToken, mastodonToken, mastodonInstance } = req.body || {};
 
-    if (!fcmToken || !mastodonToken) {
-      return res
-        .status(400)
-        .json({ error: "fcmToken and mastodonToken are required." });
+    if (!fcmToken || !mastodonToken || !mastodonInstance) {
+      return res.status(400).json({
+        error: "fcmToken, mastodonToken, and mastodonInstance are required.",
+      });
     }
 
-    // ✨ NEW: Define the default instance for backward compatibility.
-    const defaultInstance = "https://qlub.channel.org";
-    // ✨ NEW: Use the provided instanceUrl or fall back to the default.
-    const targetInstance = instanceUrl || defaultInstance;
+    // Clean the instance URL early to use it in the key
+    let cleanInstance = mastodonInstance.trim();
+    if (!cleanInstance.startsWith("http")) {
+      cleanInstance = `https://${cleanInstance}`;
+    }
+    cleanInstance = cleanInstance.replace(/\/$/, "");
 
-    // 1️⃣ Generate a unique subscription ID
+    // ✨ CHANGED: The lookup key now includes the Mastodon instance for uniqueness
+    const lookupKey = `sublookup:${fcmToken}:${cleanInstance}`;
+    const existingSubscriptionId = await kv.get(lookupKey);
+
+    if (existingSubscriptionId) {
+      const subData = await kv.get(existingSubscriptionId);
+      if (subData) {
+        console.log(
+          `Found existing subscription for FCM token and instance: ${existingSubscriptionId}`
+        );
+        return res.status(200).json({
+          message: "Subscription already exists.",
+          subscriptionId: existingSubscriptionId,
+        });
+      }
+    }
+
+    // --- If no subscription exists, proceed with creation ---
+
     const subscriptionId = uuidv4();
-
-    // 2️⃣ Generate correct Web Push subscription keys
     const ecdh = createECDH("prime256v1");
     ecdh.generateKeys();
     const publicKey = ecdh.getPublicKey();
     const privateKey = ecdh.getPrivateKey();
     const authSecret = randomBytes(16);
 
-    // 3️⃣ Store mapping in Vercel KV.
-    // 🔄 MODIFIED: We now also store the 'targetInstance' URL.
     const subscriptionData = {
-      fcmToken,
-      instanceUrl: targetInstance, // Store the instance URL
+      fcmToken, // We store this to help with deletion later
+      mastodonInstance: cleanInstance,
       keys: {
         privateKey: privateKey.toString("base64"),
         auth: authSecret.toString("base64"),
       },
     };
-    await kv.set(subscriptionId, subscriptionData, { ex: 60 * 60 * 24 * 30 }); // 30 days
 
-    // 4️⃣ Construct the webhook URL
-    const host = process.env.VERCEL_URL || req.headers.host;
-    const webhookUrl = `https://${host}/api/notify?id=${subscriptionId}`;
+    const webhookUrl = `https://mastodon-fcm-bridge-beta.vercel.app/api/notify?id=${subscriptionId}`;
 
-    // 5️⃣ Register webhook with Mastodon
-    // 🔄 MODIFIED: Use the dynamic 'targetInstance' URL instead of the hardcoded one.
     const mastodonResponse = await fetch(
-      `${targetInstance}/api/v1/push/subscription`,
+      `${cleanInstance}/api/v1/push/subscription`,
       {
         method: "POST",
         headers: {
@@ -93,15 +101,19 @@ export default async function handler(req, res) {
     if (!mastodonResponse.ok) {
       const errorData = await mastodonResponse.text();
       console.error("Mastodon API responded with error:", errorData);
-      await kv.del(subscriptionId);
       return res.status(500).json({
         error: "Mastodon API error",
         details: errorData,
       });
     }
 
+    // ✨ NEW: Store the subscription data AND the lookup keys in KV
+    const thirtyDaysInSeconds = 60 * 60 * 24 * 30;
+    await kv.set(subscriptionId, subscriptionData, { ex: thirtyDaysInSeconds });
+    await kv.set(lookupKey, subscriptionId, { ex: thirtyDaysInSeconds });
+
     console.log(
-      `Mastodon subscription created successfully for ${targetInstance}`
+      `Mastodon subscription created successfully for instance: ${cleanInstance}`
     );
     return res.status(200).json({
       message: "Subscription created successfully.",

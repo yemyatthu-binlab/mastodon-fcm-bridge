@@ -45,19 +45,22 @@ export default async function handler(req, res) {
     if (!subscription) {
       return res.status(404).json({ error: "Subscription not found." });
     }
-    
-    // 🔄 MODIFIED: Destructure 'instanceUrl' from the subscription data.
-    const { fcmToken, keys, instanceUrl } = subscription;
-    if (!fcmToken || !keys || !keys.privateKey || !keys.auth) {
+
+    // ✨ CHANGED: Retrieve 'mastodonInstance' from the subscription data
+    const { fcmToken, mastodonInstance, keys } = subscription;
+
+    // ✨ CHANGED: Updated validation to check for 'mastodonInstance'
+    if (
+      !fcmToken ||
+      !mastodonInstance ||
+      !keys ||
+      !keys.privateKey ||
+      !keys.auth
+    ) {
       return res
         .status(500)
         .json({ error: "Invalid subscription data in KV." });
     }
-    
-    // ✨ NEW: Define the default instance for backward compatibility.
-    const defaultInstance = "https://qlub.channel.org";
-    // ✨ NEW: Use the instanceUrl from KV or fall back to the default.
-    const targetInstance = instanceUrl || defaultInstance;
 
     const ecdh = createECDH("prime256v1");
     ecdh.setPrivateKey(Buffer.from(keys.privateKey, "base64"));
@@ -83,7 +86,7 @@ export default async function handler(req, res) {
 
     const notificationData = JSON.parse(decryptedPayload.toString("utf-8"));
     console.log(
-      `✅ Successfully decrypted notification from ${targetInstance}:`,
+      `✅ Successfully decrypted Mastodon Notification from ${mastodonInstance}:`,
       notificationData
     );
 
@@ -96,9 +99,9 @@ export default async function handler(req, res) {
         );
       }
 
-      // 🔄 MODIFIED: Use the dynamic 'targetInstance' URL to fetch notification details.
+      // ✨ CHANGED: The fetch URL is now built dynamically using the stored instance
       const mastodonAPIResponse = await fetch(
-        `${targetInstance}/api/v1/notifications/${notification_id}`,
+        `${mastodonInstance}/api/v1/notifications/${notification_id}`,
         {
           method: "GET",
           headers: {
@@ -126,7 +129,7 @@ export default async function handler(req, res) {
 
     const fcmMessage = {
       notification: {
-        title: "Qlub",
+        title: "Patchwork",
         body: notificationData.title || "You have a new notification",
       },
       token: fcmToken,
